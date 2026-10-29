@@ -46,6 +46,8 @@ export const updateBusinessProfile = async (req, res, next) => {
     const {
       companyName,
       name,
+      avatar,
+      logo,
       businessType,
       description,
       location,
@@ -67,15 +69,24 @@ export const updateBusinessProfile = async (req, res, next) => {
 
     await businessProfile.save();
 
-    if (name || contactPerson) {
-      await User.findByIdAndUpdate(req.user._id, { name: name || contactPerson });
+    const userUpdate = {};
+    if (name || contactPerson) userUpdate.name = name || contactPerson;
+    const resolvedAvatar = avatar !== undefined ? avatar : logo;
+    if (resolvedAvatar !== undefined) userUpdate.avatar = resolvedAvatar;
+
+    let updatedUser = null;
+    if (Object.keys(userUpdate).length > 0) {
+      updatedUser = await User.findByIdAndUpdate(req.user._id, userUpdate, { new: true });
     }
 
     await businessProfile.populate('user', 'name avatar email');
 
     res.status(200).json({
       status: 'success',
-      data: { business: businessProfile },
+      data: {
+        business: businessProfile,
+        user: updatedUser || businessProfile.user,
+      },
     });
   } catch (error) {
     next(error);

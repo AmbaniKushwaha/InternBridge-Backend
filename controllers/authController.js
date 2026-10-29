@@ -179,3 +179,46 @@ export const getMe = async (req, res, next) => {
     next(error);
   }
 };
+
+export const updateProfile = async (req, res, next) => {
+  try {
+    const { name, avatar } = req.body;
+    const updateData = {};
+
+    if (name && name.trim()) {
+      updateData.name = name.trim();
+    }
+    if (avatar !== undefined) {
+      updateData.avatar = avatar;
+    }
+
+    const updatedUser = await User.findByIdAndUpdate(
+      req.user._id,
+      updateData,
+      { new: true, runValidators: true }
+    );
+
+    let profile = null;
+    if (updatedUser.role === 'student') {
+      profile = await StudentProfile.findOne({ user: updatedUser._id }).populate('user', 'name avatar email');
+    } else if (updatedUser.role === 'business') {
+      if (name && name.trim()) {
+        await BusinessProfile.findOneAndUpdate(
+          { user: updatedUser._id },
+          { contactPerson: name.trim() }
+        );
+      }
+      profile = await BusinessProfile.findOne({ user: updatedUser._id }).populate('user', 'name avatar email');
+    }
+
+    res.status(200).json({
+      status: 'success',
+      data: {
+        user: updatedUser,
+        profile,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};

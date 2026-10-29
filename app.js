@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { AppError } from './utils/AppError.js';
 import { errorHandler } from './middlewares/errorHandler.js';
 
@@ -13,17 +15,35 @@ import { teamRouter } from './routes/teamRoutes.js';
 import { studentRouter } from './routes/studentRoutes.js';
 import { businessRouter } from './routes/businessRoutes.js';
 import { notificationRouter } from './routes/notificationRoutes.js';
+import { uploadRouter } from './routes/uploadRoutes.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 export const app = express();
 
-// Security HTTP headers
-app.use(helmet());
+// Security HTTP headers with cross-origin resource policy enabled for uploads
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
 
 // CORS Configuration
 const allowedOrigin = process.env.CLIENT_URL || 'http://localhost:3000';
 app.use(
   cors({
-    origin: allowedOrigin,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (
+        origin === allowedOrigin ||
+        /^http:\/\/localhost:\d+$/.test(origin) ||
+        /^http:\/\/127\.0\.0\.1:\d+$/.test(origin)
+      ) {
+        return callback(null, true);
+      }
+      return callback(null, true);
+    },
     credentials: true,
   })
 );
@@ -33,9 +53,12 @@ if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
 
-// Body parsers
-app.use(express.json({ limit: '1mb' }));
-app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+// Body parsers (allow up to 10mb for image uploads & base64)
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Static uploads serving
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // Health Check Endpoint
 app.get('/api/health', (req, res) => {
@@ -49,6 +72,7 @@ app.get('/api/health', (req, res) => {
 
 // Mount Feature API Routers
 app.use('/api/auth', authRouter);
+app.use('/api/upload', uploadRouter);
 app.use('/api/projects', projectRouter);
 app.use('/api/applications', applicationRouter);
 app.use('/api/teams', teamRouter);

@@ -56,6 +56,7 @@ export const updateProfile = async (req, res, next) => {
 
     const {
       name,
+      avatar,
       college,
       course,
       graduationYear,
@@ -70,8 +71,13 @@ export const updateProfile = async (req, res, next) => {
       websiteUrl,
     } = req.body;
 
-    if (name) {
-      await User.findByIdAndUpdate(req.user._id, { name });
+    const userUpdate = {};
+    if (name && name.trim()) userUpdate.name = name.trim();
+    if (avatar !== undefined) userUpdate.avatar = avatar;
+
+    let updatedUser = null;
+    if (Object.keys(userUpdate).length > 0) {
+      updatedUser = await User.findByIdAndUpdate(req.user._id, userUpdate, { new: true });
     }
 
     Object.assign(studentProfile, {
@@ -90,10 +96,14 @@ export const updateProfile = async (req, res, next) => {
     });
 
     await studentProfile.save();
+    await studentProfile.populate('user', 'name avatar email');
 
     res.status(200).json({
       status: 'success',
-      data: { student: studentProfile },
+      data: {
+        student: studentProfile,
+        user: updatedUser || studentProfile.user,
+      },
     });
   } catch (error) {
     next(error);
