@@ -2,6 +2,10 @@ import 'dotenv/config';
 import { app } from './app.js';
 import { connectDB } from './config/db.js';
 
+
+import dns from "dns"
+dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
 // Catch uncaught exceptions
 process.on('uncaughtException', (err) => {
   console.error('[UNCAUGHT EXCEPTION] Shutting down...', err.name, err.message);
