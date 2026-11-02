@@ -1,17 +1,16 @@
-import jwt from 'jsonwebtoken';
 import { User } from '../models/User.js';
 import { StudentProfile } from '../models/StudentProfile.js';
 import { BusinessProfile } from '../models/BusinessProfile.js';
 import { Notification } from '../models/Notification.js';
 import { AppError } from '../utils/AppError.js';
-
-const signToken = (id) => {
-  return jwt.sign(
-    { id },
-    process.env.JWT_SECRET || 'internbridge_jwt_secret_dev_key_super_secure_2026',
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
-  );
-};
+import {
+  signAccessToken,
+  signRefreshToken,
+  verifyRefreshToken,
+  hashToken,
+  setAuthCookies,
+  clearAuthCookies,
+} from '../utils/tokenUtils.js';
 
 export const register = async (req, res, next) => {
   try {
@@ -90,12 +89,25 @@ export const register = async (req, res, next) => {
       link: role === 'student' ? '/projects' : '/business/projects/new',
     }).catch((err) => console.warn('Welcome notification note:', err.message));
 
-    const token = signToken(newUser._id);
+    // 4. Generate short-lived access token and longer-lived refresh token
+    const accessToken = signAccessToken(newUser._id
+      
+    );
+    const refreshToken = signRefreshToken(newUser._id);
+
+    // Save hashed refresh token to user in database for revocation checks
+    await User.findByIdAndUpdate(newUser._id, { refreshToken: hashToken(refreshToken) });
+
+    // Set secure HttpOnly cookies
+    setAuthCookies(res, accessToken, refreshToken);
+
     newUser.password = undefined;
+    newUser.refreshToken = undefined;
 
     res.status(201).json({
       status: 'success',
-      token,
+      accessToken,
+      token: accessToken, // for backwards compatibility
       data: {
         user: newUser,
         profile,
@@ -141,16 +153,137 @@ export const login = async (req, res, next) => {
       profile = await BusinessProfile.findOne({ user: user._id });
     }
 
-    const token = signToken(user._id);
+    // Generate short-lived access token and longer-lived refresh token
+    const accessToken = signAccessToken(user._id);
+    const refreshToken = signRefreshToken(user._id);
+
+    // Store hashed refresh token in database
+    await User.findByIdAndUpdate(user._id, { refreshToken: hashToken(refreshToken) });
+
+    // Set secure HttpOnly cookies
+    setAuthCookies(res, accessToken, refreshToken);
+
     user.password = undefined;
+    user.refreshToken = undefined;
 
     res.status(200).json({
       status: 'success',
-      token,
+      accessToken,
+      token: accessToken, // for backwards compatibility
       data: {
         user,
         profile,
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Refresh access token using HttpOnly refresh token cookie (or body fallback)
+ */
+export const refresh = async (req, res, next) => {
+  try {
+    const token = req.cookies?.refreshToken || req.body?.refreshToken;
+
+    if (!token) {
+      return next(new AppError('No refresh token provided. Please log in to continue.', 401));
+    }
+
+    let decoded;
+    try {
+      decoded = verifyRefreshToken(token);
+    } catch (err) {
+      clearAuthCookies(res);
+      if (err.name === 'TokenExpiredError') {
+        const error = new AppError('Your session has expired. Please log in again.', 401);
+        error.code = 'REFRESH_TOKEN_EXPIRED';
+        return next(error);
+      }
+      return next(new AppError('Invalid refresh token. Please log in again.', 401));
+    }
+
+    // Find user with refreshToken selected
+    const user = await User.findById(decoded.id).select('+refreshToken');
+
+    if (!user) {
+      clearAuthCookies(res);
+      return next(new AppError('The user belonging to this token no longer exists.', 401));
+    }
+
+    if (!user.isActive) {
+      clearAuthCookies(res);
+      return next(new AppError('This user account has been deactivated.', 403));
+    }
+
+    // Revocation & token reuse check
+    const hashed = hashToken(token);
+    if (!user.refreshToken || user.refreshToken !== hashed) {
+      // Token was revoked or does not match active session - revoke immediately
+      await User.findByIdAndUpdate(user._id, { $unset: { refreshToken: 1 } });
+      clearAuthCookies(res);
+      return next(new AppError('Refresh token has been revoked or invalidated. Please log in again.', 401));
+    }
+
+    // Generate new access token and rotated refresh token
+    const newAccessToken = signAccessToken(user._id);
+    const newRefreshToken = signRefreshToken(user._id);
+
+    // Update stored refresh token in database (rotation)
+    await User.findByIdAndUpdate(user._id, { refreshToken: hashToken(newRefreshToken) });
+
+    // Update cookies
+    setAuthCookies(res, newAccessToken, newRefreshToken);
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Access token refreshed successfully',
+      accessToken: newAccessToken,
+      token: newAccessToken,
+      data: {
+        user: {
+          _id: user._id,
+          id: user._id,
+          email: user.email,
+          role: user.role,
+          name: user.name,
+          avatar: user.avatar,
+        },
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Clear HttpOnly cookies and revoke refresh token in database
+ */
+export const logout = async (req, res, next) => {
+  try {
+    const token = req.cookies?.refreshToken || req.body?.refreshToken;
+
+    // 1. Revoke refresh token in database
+    if (req.user?._id) {
+      await User.findByIdAndUpdate(req.user._id, { $unset: { refreshToken: 1 } });
+    } else if (token) {
+      try {
+        const decoded = verifyRefreshToken(token);
+        if (decoded?.id) {
+          await User.findByIdAndUpdate(decoded.id, { $unset: { refreshToken: 1 } });
+        }
+      } catch {
+        // Token was already expired or invalid, still proceed
+      }
+    }
+
+    // 2. Clear secure HttpOnly cookies
+    clearAuthCookies(res);
+
+    res.status(200).json({
+      status: 'success',
+      message: 'Successfully logged out and session revoked.',
     });
   } catch (error) {
     next(error);
@@ -163,9 +296,9 @@ export const getMe = async (req, res, next) => {
     let profile = null;
 
     if (user.role === 'student') {
-      profile = await StudentProfile.findOne({ user: user._id });
+      profile = await StudentProfile.findOne({ user: user._id }).populate('user', 'name avatar email');
     } else if (user.role === 'business') {
-      profile = await BusinessProfile.findOne({ user: user._id });
+      profile = await BusinessProfile.findOne({ user: user._id }).populate('user', 'name avatar email');
     }
 
     res.status(200).json({
@@ -182,37 +315,125 @@ export const getMe = async (req, res, next) => {
 
 export const updateProfile = async (req, res, next) => {
   try {
-    const { name, avatar } = req.body;
-    const updateData = {};
+    const user = req.user;
+    const {
+      name,
+      avatar,
+      college,
+      course,
+      graduationYear,
+      bio,
+      selfReportedSkills,
+      interests,
+      availability,
+      preferredArrangement,
+      experienceLevel,
+      githubUrl,
+      linkedinUrl,
+      websiteUrl,
+      companyName,
+      businessType,
+      description,
+      location,
+      contactPerson,
+      contactEmail,
+    } = req.body;
 
-    if (name && name.trim()) {
-      updateData.name = name.trim();
-    }
-    if (avatar !== undefined) {
-      updateData.avatar = avatar;
-    }
-
-    const updatedUser = await User.findByIdAndUpdate(
-      req.user._id,
-      updateData,
-      { new: true, runValidators: true }
-    );
-
-    let profile = null;
-    if (updatedUser.role === 'student') {
-      profile = await StudentProfile.findOne({ user: updatedUser._id }).populate('user', 'name avatar email');
-    } else if (updatedUser.role === 'business') {
-      if (name && name.trim()) {
-        await BusinessProfile.findOneAndUpdate(
-          { user: updatedUser._id },
-          { contactPerson: name.trim() }
-        );
+    // Server-side validation
+    if (name !== undefined) {
+      if (!name || name.trim().length < 2) {
+        return next(new AppError('Full name must be at least 2 characters long.', 400));
       }
-      profile = await BusinessProfile.findOne({ user: updatedUser._id }).populate('user', 'name avatar email');
+    }
+
+    if (graduationYear !== undefined && graduationYear !== null && graduationYear !== '') {
+      const year = Number(graduationYear);
+      if (isNaN(year) || year < 1980 || year > 2040) {
+        return next(new AppError('Graduation year must be a valid four-digit year between 1980 and 2040.', 400));
+      }
+    }
+
+    // 1. Update User record
+    const userUpdate = {};
+    if (name && name.trim()) userUpdate.name = name.trim();
+    if (avatar !== undefined) userUpdate.avatar = avatar;
+
+    let updatedUser = user;
+    if (Object.keys(userUpdate).length > 0) {
+      updatedUser = await User.findByIdAndUpdate(user._id, userUpdate, {
+        new: true,
+        runValidators: true,
+      });
+    }
+
+    // 2. Update role-specific profile in MongoDB
+    let profile = null;
+
+    if (user.role === 'student') {
+      let studentProfile = await StudentProfile.findOne({ user: user._id });
+
+      const profileFields = {
+        college: college !== undefined ? college : studentProfile?.college || '',
+        course: course !== undefined ? course : studentProfile?.course || '',
+        graduationYear: graduationYear ? Number(graduationYear) : studentProfile?.graduationYear || 2026,
+        bio: bio !== undefined ? bio : studentProfile?.bio || '',
+        selfReportedSkills: selfReportedSkills !== undefined
+          ? (Array.isArray(selfReportedSkills) ? selfReportedSkills : selfReportedSkills.split(',').map((s) => s.trim()).filter(Boolean))
+          : studentProfile?.selfReportedSkills || [],
+        interests: interests !== undefined
+          ? (Array.isArray(interests) ? interests : interests.split(',').map((s) => s.trim()).filter(Boolean))
+          : studentProfile?.interests || [],
+        availability: availability || studentProfile?.availability || '15-25 hrs/week',
+        preferredArrangement: preferredArrangement || studentProfile?.preferredArrangement || 'Remote',
+        experienceLevel: experienceLevel || studentProfile?.experienceLevel || 'Intermediate',
+        githubUrl: githubUrl !== undefined ? githubUrl : studentProfile?.githubUrl || '',
+        linkedinUrl: linkedinUrl !== undefined ? linkedinUrl : studentProfile?.linkedinUrl || '',
+        websiteUrl: websiteUrl !== undefined ? websiteUrl : studentProfile?.websiteUrl || '',
+      };
+
+      if (!studentProfile) {
+        studentProfile = await StudentProfile.create({
+          user: user._id,
+          ...profileFields,
+        });
+      } else {
+        Object.assign(studentProfile, profileFields);
+        await studentProfile.save();
+      }
+
+      await studentProfile.populate('user', 'name avatar email');
+      profile = studentProfile;
+    } else if (user.role === 'business') {
+      let businessProfile = await BusinessProfile.findOne({ user: user._id });
+
+      const resolvedCompanyName = companyName || name;
+      const profileFields = {
+        companyName: resolvedCompanyName || businessProfile?.companyName || user.name,
+        businessType: businessType || businessProfile?.businessType || 'Retail & D2C',
+        description: description !== undefined ? description : businessProfile?.description || '',
+        location: location || businessProfile?.location || 'India',
+        contactPerson: contactPerson || name || businessProfile?.contactPerson || user.name,
+        websiteUrl: websiteUrl !== undefined ? websiteUrl : businessProfile?.websiteUrl || '',
+        preferredArrangement: preferredArrangement || businessProfile?.preferredArrangement || 'Remote',
+      };
+
+      if (!businessProfile) {
+        businessProfile = await BusinessProfile.create({
+          user: user._id,
+          ...profileFields,
+        });
+      } else {
+        Object.assign(businessProfile, profileFields);
+        await businessProfile.save();
+      }
+
+      await businessProfile.populate('user', 'name avatar email');
+      profile = businessProfile;
     }
 
     res.status(200).json({
       status: 'success',
+      message: 'Profile details updated successfully in database.',
       data: {
         user: updatedUser,
         profile,

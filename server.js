@@ -1,10 +1,13 @@
 import 'dotenv/config';
 import { app } from './app.js';
 import { connectDB } from './config/db.js';
-
+import { validateAuthEnvironment } from './utils/tokenUtils.js';
 
 import dns from "dns"
 dns.setServers(["8.8.8.8", "1.1.1.1"]);
+
+// Validate required authentication environment variables
+validateAuthEnvironment();
 
 // Catch uncaught exceptions
 process.on('uncaughtException', (err) => {
@@ -19,8 +22,7 @@ await connectDB();
 
 const server = app.listen(PORT, () => {
   console.log(`InternBridge Backend running on http://localhost:${PORT} [${process.env.NODE_ENV || 'development'}]`);
-  // console.log(`🔗 API Base: http://localhost:${PORT}/api`);
-  // console.log(`💓 Health:   http://localhost:${PORT}/api/health`);
+  
 });
 
 // Handle unhandled promise rejections

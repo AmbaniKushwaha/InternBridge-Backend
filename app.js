@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { AppError } from './utils/AppError.js';
@@ -52,6 +53,9 @@ app.use(
 if (process.env.NODE_ENV === 'development') {
   app.use(morgan('dev'));
 }
+
+// Cookie parser for secure HttpOnly access & refresh tokens
+app.use(cookieParser());
 
 // Body parsers (allow up to 10mb for image uploads & base64)
 app.use(express.json({ limit: '10mb' }));
